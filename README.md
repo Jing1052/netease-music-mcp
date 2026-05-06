@@ -1,6 +1,6 @@
 # netease-music-mcp
 
-一个用于控制本机网易云音乐播放的 MCP Server。它通过 `neteasecli` 和本地 `mpv` 播放音乐，并提供一个本地歌词播放器 Web UI。
+一个用于控制本机音乐播放的 MCP Server。它通过 `neteasecli` 和本地 `mpv` 播放音乐，并提供一个本地歌词播放器 Web UI。
 
 ## 免责声明 / Disclaimer
 
