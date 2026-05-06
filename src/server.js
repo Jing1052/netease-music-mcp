@@ -2920,7 +2920,7 @@ function playerHtml() {
         if (!playbackQueue.length || queueIndex < 0) {
           const currentId = currentContext?.playback?.id;
           if (currentId) {
-            await replayTrack(currentId, { fromAuto: true, optimisticTrack: currentContext.playback });
+            await replayTrack(currentId, { optimisticTrack: currentContext.playback });
           }
           return;
         }
@@ -2935,7 +2935,7 @@ function playerHtml() {
         } else if (queueIndex >= playbackQueue.length - 1) {
           nextIndex = queueIndex;
         }
-        await playQueueIndex(nextIndex, { fromAuto: true, replayCurrent: nextIndex === queueIndex });
+        await playQueueIndex(nextIndex, { replayCurrent: nextIndex === queueIndex });
       } finally {
         autoAdvanceInFlight = false;
       }
