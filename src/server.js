@@ -20,6 +20,8 @@ let playbackOperation = Promise.resolve();
 let pendingPlaybackState = null;
 let pendingPlaybackExpiresAt = 0;
 let replayRequestGuard = null;
+let activeWebClientToken = null;
+let activeWebClientSeenAt = 0;
 
 const appData = process.env.APPDATA ?? "";
 const neteaseCliScript = path.join(appData, "npm", "node_modules", "neteasecli", "dist", "index.js");
@@ -656,19 +658,6 @@ function isCreditLine(text) {
 
 function firstLyricLines(lines, count) {
   return lines.filter((line) => !isCreditLine(line.text)).map(lyricLineText).slice(0, count);
-}
-
-function lyricWindow(lines, positionSeconds, before = 2, afterIncludingCurrent = 4) {
-  const meaningful = lines.filter((line) => !isCreditLine(line.text));
-  if (meaningful.length === 0) return [];
-  let index = meaningful.findIndex((line, i) => {
-    const next = meaningful[i + 1];
-    return line.time <= positionSeconds && (!next || next.time > positionSeconds);
-  });
-  if (index < 0) index = 0;
-  const start = Math.max(0, index - before);
-  const end = Math.min(meaningful.length, index + afterIncludingCurrent);
-  return meaningful.slice(start, end).map(lyricLineText);
 }
 
 function upcomingLyricLines(lines, positionSeconds, count = 6) {
@@ -1362,6 +1351,7 @@ function playerHtml() {
       padding-right: 4px;
     }
     .playlist-detail {
+      --detail-grid: 42px 42px clamp(300px, 46vw, 500px) clamp(120px, 18vw, 220px) 48px minmax(0, 1fr) 32px;
       display: grid;
       gap: 18px;
       min-height: 0;
@@ -1454,12 +1444,24 @@ function playerHtml() {
     }
     .detail-table-head {
       display: grid;
-      grid-template-columns: 42px 42px minmax(180px, 1fr) minmax(120px, .7fr) 62px 34px;
+      grid-template-columns: var(--detail-grid);
       gap: 10px;
       color: var(--muted);
       font-size: 12px;
-      padding: 0 0 7px;
+      box-sizing: border-box;
+      padding: 0 18px 7px 0;
       border-bottom: 1px solid var(--line);
+    }
+    .detail-table-head span:nth-child(5),
+    .detail-track .track-time {
+      text-align: right;
+    }
+    .detail-table-head span:first-child {
+      visibility: hidden;
+    }
+    .detail-table-head span:nth-child(6),
+    .detail-track .play-small {
+      grid-column: 7;
     }
     .detail-tracks {
       flex: 1 1 auto;
@@ -1469,13 +1471,14 @@ function playerHtml() {
     }
     .detail-track {
       display: grid;
-      grid-template-columns: 42px 42px minmax(180px, 1fr) minmax(120px, .7fr) 62px 34px;
+      grid-template-columns: var(--detail-grid, 42px 42px clamp(300px, 46vw, 500px) clamp(120px, 18vw, 220px) 48px minmax(0, 1fr) 32px);
       gap: 10px;
       align-items: center;
       min-height: 50px;
       border-bottom: 1px solid var(--line);
       color: #d9dde2;
       font-size: 13px;
+      padding-right: 18px;
     }
     .detail-track .track-cover {
       width: 38px;
@@ -2544,6 +2547,7 @@ function playerHtml() {
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
+    const webClientToken = (crypto?.randomUUID?.() || String(Date.now()) + Math.random().toString(16).slice(2));
     let dashboard = { playlists: [], recommended_playlists: [], liked_tracks: [] };
     let currentPlaylist = null;
     let currentPlaylistTracks = [];
@@ -2592,14 +2596,14 @@ function playerHtml() {
     let volumeUserControlled = false;
     let volumeSyncInFlight = false;
     let recPageSize = 7;
-    const lyricLeadSeconds = 2.1;
+    const lyricLeadSeconds = 2.85;
     const playIconSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.25 6.5v11l8.5-5.5z"/></svg>';
     const pauseIconSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>';
 
     async function api(path, body) {
       const res = await fetch(path, {
         method: body ? "POST" : "GET",
-        headers: body ? { "content-type": "application/json" } : {},
+        headers: body ? { "content-type": "application/json", "x-web-player-client": webClientToken } : { "x-web-player-client": webClientToken },
         body: body ? JSON.stringify(body) : undefined,
       });
       const data = await res.json();
@@ -2825,7 +2829,9 @@ function playerHtml() {
         autoAdvanceArmed = true;
       }
       if (!replayGuardActive && !playbackProgressPending && autoAdvanceArmed && Date.now() >= autoAdvanceCooldownUntil && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
-        void playNextFromQueue().catch((error) => { $("status").textContent = error.message || "自动播放下一首失败"; });
+        autoAdvanceArmed = false;
+        autoAdvanceCooldownUntil = Date.now() + 5000;
+        $("nextTrack").click();
       }
       requestAnimationFrame(updateLocalProgress);
     }
@@ -2877,7 +2883,7 @@ function playerHtml() {
         '</button>'
       )).join("") : '<div class="empty">暂无播放队列</div>';
     }
-    async function playQueueIndex(index, { fromAuto = false, replayCurrent = false } = {}) {
+    async function playQueueIndex(index, { replayCurrent = false } = {}) {
       if (!playbackQueue.length) return;
       const nextIndex = Math.max(0, Math.min(playbackQueue.length - 1, Number(index || 0)));
       const track = playbackQueue[nextIndex];
@@ -2885,11 +2891,11 @@ function playerHtml() {
       queueIndex = nextIndex;
       autoAdvanceCooldownUntil = Date.now() + 5000;
       renderQueue();
-      const replayingSameTrack = replayCurrent || (fromAuto && currentContext?.playback?.id && String(currentContext.playback.id) === String(track.id));
+      const replayingSameTrack = replayCurrent;
       if (replayingSameTrack) {
-        await replayTrack(track.id, { fromAuto, optimisticTrack: track });
+        await replayTrack(track.id, { optimisticTrack: track });
       } else {
-        await playTrack(track.id, { fromAuto, optimisticTrack: track });
+        await playTrack(track.id, { optimisticTrack: track });
       }
     }
     function syncQueueIndexFromCurrent() {
@@ -3422,7 +3428,7 @@ function playerHtml() {
         await sleep(350);
       }
     }
-    async function playTrack(id, { fromAuto = false, optimisticTrack = null } = {}) {
+    async function playTrack(id, { optimisticTrack = null } = {}) {
       $("status").textContent = "播放中";
       optimisticPlayback(optimisticTrack || findKnownTrack(id), id);
       const result = await api("/api/play-track", { id });
@@ -3451,7 +3457,7 @@ function playerHtml() {
       playbackPaused = false;
       playbackPosition = nextPosition;
       playbackSyncedAt = Date.now();
-      autoAdvanceArmed = !fromAuto;
+      autoAdvanceArmed = true;
       if (currentContext.playback?.name) $("song").textContent = currentContext.playback.name;
       $("meta").textContent = currentContext.playback?.artist || "正在播放";
       if (currentContext.playback?.coverUrl) {
@@ -3460,10 +3466,10 @@ function playerHtml() {
       }
       setPlaybackButtonIcon(true, false);
       if (playerOverlayOpen) renderPlayerPage(currentContext);
-      if (!fromAuto) renderQueue();
+      renderQueue();
       void syncPlaybackStart().catch(() => {});
     }
-    async function replayTrack(id, { fromAuto = false, optimisticTrack = null } = {}) {
+    async function replayTrack(id, { optimisticTrack = null } = {}) {
       $("status").textContent = "重播中";
       optimisticPlayback(optimisticTrack || findKnownTrack(id), id);
       armReplayGuard(id);
@@ -3478,11 +3484,11 @@ function playerHtml() {
       playbackPosition = nextPosition;
       playbackSyncedAt = Date.now();
       armReplayGuard(id);
-      autoAdvanceArmed = !fromAuto;
+      autoAdvanceArmed = true;
       setPlaybackButtonIcon(true, false);
       updateProgressUi(playbackPosition, playbackDuration);
       if (playerOverlayOpen && currentContext) renderPlayerPage(currentContext);
-      if (!fromAuto) renderQueue();
+      renderQueue();
       void syncPlaybackStart().catch(() => {});
     }
     async function playPlaylist(id) {
@@ -3667,6 +3673,19 @@ function playerHtml() {
 </html>`;
 }
 
+function acceptWebClient(req) {
+  const token = String(req.headers["x-web-player-client"] ?? "").trim();
+  if (!token) return;
+  activeWebClientToken = token;
+  activeWebClientSeenAt = Date.now();
+}
+
+function validateWebPlaybackClient(req) {
+  const token = String(req.headers["x-web-player-client"] ?? "").trim();
+  const activeFresh = activeWebClientToken && Date.now() - activeWebClientSeenAt < 12 * 60 * 60 * 1000;
+  return !activeFresh || token === activeWebClientToken;
+}
+
 async function handleWebApi(req, res) {
   const url = new URL(req.url, "http://localhost");
   try {
@@ -3674,6 +3693,7 @@ async function handleWebApi(req, res) {
       htmlResponse(res, playerHtml());
       return;
     }
+    acceptWebClient(req);
     if (req.method === "GET" && url.pathname === "/api/context") {
       jsonResponse(res, 200, await currentListeningContext());
       return;
@@ -3726,6 +3746,10 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/play") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const body = await readRequestJson(req);
       const keyword = String(body.keyword ?? "").trim();
       if (!keyword) {
@@ -3752,6 +3776,10 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/play-track") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const body = await readRequestJson(req);
       const id = String(body.id ?? "").trim();
       if (!id) {
@@ -3782,6 +3810,10 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/replay-track") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const body = await readRequestJson(req);
       const id = String(body.id ?? "").trim();
       if (!id) {
@@ -3802,6 +3834,10 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/play-playlist") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const body = await readRequestJson(req);
       const id = String(body.id ?? "").trim();
       if (!id) {
@@ -3819,11 +3855,19 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/pause") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const result = await toggleOrRestartPlayback();
       jsonResponse(res, 200, { success: true, result });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/seek") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const body = await readRequestJson(req);
       const seconds = Math.max(0, Math.round(Number(body.seconds ?? 0)));
       if (!Number.isFinite(seconds)) {
@@ -3835,6 +3879,10 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/volume") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       const body = await readRequestJson(req);
       const volume = Math.max(0, Math.min(100, Math.round(Number(body.volume ?? 80))));
       if (!Number.isFinite(volume)) {
@@ -3846,6 +3894,10 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/stop") {
+      if (!validateWebPlaybackClient(req)) {
+        jsonResponse(res, 409, { success: false, message: "Ignored playback request from an older web player tab" });
+        return;
+      }
       clearPendingPlaybackState();
       clearReplayRequestGuard();
       const result = parseJson((await runNetease(["--pretty", "player", "stop"])).stdout, "neteasecli player stop");
