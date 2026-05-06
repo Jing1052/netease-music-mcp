@@ -2533,6 +2533,15 @@ function playerHtml() {
       if (playerOverlayOpen) renderPlayerPage(currentContext);
       return true;
     }
+    function schedulePlaybackSettleRefresh(delayMs = 1600) {
+      const until = Date.now() + delayMs;
+      playbackControlPendingUntil = Math.max(playbackControlPendingUntil, until);
+      setTimeout(() => {
+        if (Date.now() < playbackControlPendingUntil - 20) return;
+        playbackControlPendingUntil = 0;
+        void refresh().catch(() => {});
+      }, delayMs + 30);
+    }
     function normalizeVolumeValue(volume) {
       const raw = Number(volume);
       if (!Number.isFinite(raw)) return null;
@@ -3317,8 +3326,7 @@ function playerHtml() {
           };
           await syncPlaybackStart();
         } else {
-          playbackControlPendingUntil = 0;
-          void refresh().catch(() => {});
+          schedulePlaybackSettleRefresh();
         }
       } catch (error) {
         playbackControlPendingUntil = 0;
