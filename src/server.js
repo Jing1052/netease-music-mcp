@@ -217,8 +217,12 @@ async function withPlaybackLock(action) {
 }
 
 async function closeWebPlayerBestEffort() {
+  const fallbackPort = webPlayerPort || 8765;
   if (!webPlayerServer) {
-    return { success: true, closed: false, message: "Web player was not running." };
+    const standalone = await closeStandaloneWebPlayerBestEffort(fallbackPort);
+    return standalone.closed
+      ? standalone
+      : { success: true, closed: false, message: "Web player was not running.", standalone };
   }
   const serverToClose = webPlayerServer;
   webPlayerServer = null;
@@ -230,6 +234,49 @@ async function closeWebPlayerBestEffort() {
     return { success: true, closed: true };
   } catch (error) {
     return { success: false, closed: false, message: String(error.message ?? error) };
+  }
+}
+
+async function closeStandaloneWebPlayerBestEffort(port = 8765) {
+  if (process.platform !== "win32") {
+    return { success: true, closed: false, message: "Standalone web player cleanup is only implemented for Windows." };
+  }
+  const scriptPath = path.join("src", "server.js");
+  const ps = [
+    `$port = ${Number(port) || 8765}`,
+    `$root = ${psQuote(rootDir)}`,
+    `$script = ${psQuote(scriptPath)}`,
+    "$listeners = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue)",
+    "$stopped = @()",
+    "foreach ($listener in $listeners) {",
+    "  $ownerPid = [int]$listener.OwningProcess",
+    "  if ($ownerPid -eq $PID) { continue }",
+    "  $process = Get-CimInstance Win32_Process -Filter \"ProcessId = $ownerPid\" -ErrorAction SilentlyContinue",
+    "  $cmd = [string]$process.CommandLine",
+    "  $isThisProject = $cmd.Contains($root) -or $cmd.Contains($script)",
+    "  $isWebPlayer = $cmd.Contains('--web-player')",
+    "  if ($isThisProject -and $isWebPlayer) {",
+    "    Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue",
+    "    $stopped += $ownerPid",
+    "  }",
+    "}",
+    "$stopped -join ','",
+  ].join("; ");
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", ps], {
+      timeout: 5000,
+      windowsHide: true,
+    });
+    const stoppedIds = stdout.trim().split(",").map((id) => id.trim()).filter(Boolean);
+    return {
+      success: true,
+      closed: stoppedIds.length > 0,
+      port,
+      stoppedIds,
+      message: stoppedIds.length ? "Closed standalone web player process." : "No standalone web player process found.",
+    };
+  } catch (error) {
+    return { success: false, closed: false, port, message: String(error.message ?? error) };
   }
 }
 
