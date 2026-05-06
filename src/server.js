@@ -498,10 +498,25 @@ async function getRecommendedPlaylistPageData(offset = 0, limit = 14) {
   };
 }
 
+async function getLikedTracksPageData(offset = 0, limit = 24) {
+  const start = Math.max(0, Number(offset || 0));
+  const count = Math.max(1, Math.min(50, Number(limit || 24)));
+  const liked = await getLikedTracks(start + count);
+  const page = (liked.tracks ?? []).slice(start, start + count);
+  return {
+    success: true,
+    offset: start,
+    limit: count,
+    total: liked.total,
+    hasMore: start + page.length < liked.total,
+    tracks: await enrichTracks(page, count),
+  };
+}
+
 async function getDashboardData() {
   const [playlists, liked] = await Promise.all([
     getUserPlaylists(),
-    getLikedTracks(80),
+    getLikedTracks(36),
   ]);
   const topPlaylists = playlists.slice(0, 24);
   const details = await Promise.all(topPlaylists.map((playlist) => (
@@ -525,6 +540,7 @@ async function getDashboardData() {
     recommended_has_more: recommended.length < playlists.filter((playlist) => playlist.creator && playlist.creator !== creator).length,
     liked_tracks: await enrichTracks(liked.tracks, 36),
     liked_total: liked.total,
+    liked_has_more: liked.tracks.length < liked.total,
   };
 }
 
@@ -2378,6 +2394,10 @@ function playerHtml() {
     let recommendedTotal = 0;
     let recommendedHasMore = false;
     let recommendedLoadingMore = false;
+    let likedOffset = 0;
+    let likedTotal = 0;
+    let likedHasMore = false;
+    let likedLoadingMore = false;
     let playbackPosition = 0;
     let playbackDuration = 0;
     let playbackActive = false;
@@ -2834,7 +2854,32 @@ function playerHtml() {
           '<button class="play-small" data-track="' + escapeHtml(track.id) + '" data-liked-index="' + index + '" title="播放">▶</button>' +
           '<div class="more">⋮</div>' +
         '</div>'
-      )).join("") : '<div class="empty">暂无喜欢的音乐</div>';
+      )).join("") + (likedHasMore ? '<div class="empty liked-loading">继续下滑加载更多歌曲...</div>' : "") : '<div class="empty">暂无喜欢的音乐</div>';
+    }
+    async function loadMoreLikedTracks() {
+      if (likedLoadingMore || !likedHasMore) return;
+      likedLoadingMore = true;
+      try {
+        const data = await api("/api/liked-tracks?offset=" + encodeURIComponent(String(likedOffset)) + "&limit=24");
+        const seen = new Set((dashboard.liked_tracks || []).map((track) => String(track.id)));
+        const incoming = (data.tracks || []).filter((track) => !seen.has(String(track.id)));
+        dashboard.liked_tracks = [...(dashboard.liked_tracks || []), ...incoming];
+        likedOffset = dashboard.liked_tracks.length;
+        likedTotal = Number(data.total || likedTotal || likedOffset);
+        likedHasMore = Boolean(data.hasMore && likedOffset < likedTotal);
+        renderCharts();
+      } catch (error) {
+        $("status").textContent = error.message || "加载喜欢的音乐失败";
+      } finally {
+        likedLoadingMore = false;
+      }
+    }
+    function maybeLoadMoreLikedTracks() {
+      const el = $("charts");
+      if (!el || likedLoadingMore || !likedHasMore) return;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 90) {
+        void loadMoreLikedTracks();
+      }
     }
     function renderPlaylistDetail(data) {
       currentPlaylist = data.playlist;
@@ -3007,6 +3052,9 @@ function playerHtml() {
       recommendedOffset = (dashboard.recommended_playlists || []).length;
       recommendedTotal = Number(dashboard.recommended_total || recommendedOffset);
       recommendedHasMore = Boolean(dashboard.recommended_has_more && recommendedOffset < recommendedTotal);
+      likedOffset = (dashboard.liked_tracks || []).length;
+      likedTotal = Number(dashboard.liked_total || likedOffset);
+      likedHasMore = Boolean(dashboard.liked_has_more && likedOffset < likedTotal);
       recPage = 0;
       renderPlaylists();
       renderRecommended();
@@ -3235,6 +3283,7 @@ function playerHtml() {
       if (event.key === "Enter") $("searchButton").click();
     });
     $("playlists").addEventListener("scroll", maybeLoadMorePlaylists);
+    $("charts").addEventListener("scroll", maybeLoadMoreLikedTracks);
     $("playerTimeline").addEventListener("mouseenter", updateTimelineHover);
     $("playerTimeline").addEventListener("mousemove", updateTimelineHover);
     $("playerTimeline").addEventListener("mouseleave", () => {
@@ -3317,6 +3366,12 @@ async function handleWebApi(req, res) {
       const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
       const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit") ?? 14) || 14));
       jsonResponse(res, 200, await getRecommendedPlaylistPageData(offset, limit));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/liked-tracks") {
+      const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+      const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit") ?? 24) || 24));
+      jsonResponse(res, 200, await getLikedTracksPageData(offset, limit));
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/playlist") {
