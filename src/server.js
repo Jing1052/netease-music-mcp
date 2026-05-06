@@ -2433,6 +2433,7 @@ function playerHtml() {
     let playbackPaused = false;
     let playbackProgressPending = false;
     let playbackSyncedAt = Date.now();
+    let playbackStartGuard = null;
     let playbackControlPendingUntil = 0;
     let playbackControlGuard = null;
     let activeLyricIndex = -1;
@@ -3045,6 +3046,10 @@ function playerHtml() {
       playbackActive = true;
       playbackPaused = false;
       playbackProgressPending = true;
+      playbackStartGuard = {
+        trackId: fallbackId,
+        expiresAt: Date.now() + 8000,
+      };
       playbackSyncedAt = Date.now();
       activeLyricIndex = -1;
       renderedLyricsKey = "";
@@ -3126,6 +3131,13 @@ function playerHtml() {
       const pendingId = currentContext?.playback?.id ? String(currentContext.playback.id) : "";
       const incomingId = p.id ? String(p.id) : "";
       if (playbackProgressPending && pendingId && incomingId && incomingId !== pendingId) {
+        const startGuardActive = Boolean(
+          playbackStartGuard &&
+          playbackStartGuard.trackId === pendingId &&
+          Date.now() < playbackStartGuard.expiresAt
+        );
+        if (startGuardActive) return false;
+        playbackStartGuard = null;
         if (!allowExternalChange) return false;
         playbackProgressPending = false;
       }
@@ -3155,6 +3167,7 @@ function playerHtml() {
         playbackActive = true;
         playbackPaused = false;
         playbackProgressPending = false;
+        playbackStartGuard = null;
       } else if (wasPending && !nextActive) {
         playbackPosition = 0;
         playbackActive = true;
