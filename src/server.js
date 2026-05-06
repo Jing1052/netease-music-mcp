@@ -855,6 +855,32 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
   });
 }
 
+async function replayCurrentTrackFromStart(id) {
+  return withPlaybackLock(async () => {
+    const state = await readState();
+    if (!state?.id || String(state.id) !== String(id)) {
+      throw new Error("Cached track does not match the requested replay target");
+    }
+    const replayState = { ...state, startedAt: new Date().toISOString() };
+    pendingPlaybackState = replayState;
+    pendingPlaybackExpiresAt = Date.now() + 15000;
+    await writeState(replayState);
+    try {
+      await runNetease(["--pretty", "player", "seek", "--absolute", "0"], { timeout: 10000 });
+      await delay(150);
+      const status = await getPlayerStatus().catch(() => null);
+      if (status?.data?.paused) {
+        await runNetease(["--pretty", "player", "pause"], { timeout: 10000 });
+      }
+      return replayState;
+    } finally {
+      if (pendingPlaybackState?.id === String(id)) {
+        clearPendingPlaybackState();
+      }
+    }
+  });
+}
+
 async function toggleOrRestartPlayback() {
   try {
     const status = await getPlayerStatus().catch(() => null);
@@ -2783,7 +2809,12 @@ function playerHtml() {
       queueIndex = nextIndex;
       autoAdvanceCooldownUntil = Date.now() + 5000;
       renderQueue();
-      await playTrack(track.id, { fromAuto, optimisticTrack: track });
+      const replayingSameTrack = fromAuto && currentContext?.playback?.id && String(currentContext.playback.id) === String(track.id);
+      if (replayingSameTrack) {
+        await replayTrack(track.id, { fromAuto, optimisticTrack: track });
+      } else {
+        await playTrack(track.id, { fromAuto, optimisticTrack: track });
+      }
     }
     function syncQueueIndexFromCurrent() {
       if (queueIndex >= 0) return queueIndex;
@@ -3343,6 +3374,23 @@ function playerHtml() {
       if (!fromAuto) renderQueue();
       void syncPlaybackStart().catch(() => {});
     }
+    async function replayTrack(id, { fromAuto = false, optimisticTrack = null } = {}) {
+      $("status").textContent = "重播中";
+      optimisticPlayback(optimisticTrack || findKnownTrack(id), id);
+      const result = await api("/api/replay-track", { id });
+      const durationMs = Number(result?.playback?.durationMs ?? 0);
+      if (durationMs) playbackDuration = durationMs / 1000;
+      playbackActive = true;
+      playbackPaused = false;
+      playbackPosition = 0;
+      playbackSyncedAt = Date.now();
+      autoAdvanceArmed = !fromAuto;
+      setPlaybackButtonIcon(true, false);
+      updateProgressUi(0, playbackDuration);
+      if (playerOverlayOpen && currentContext) renderPlayerPage(currentContext);
+      if (!fromAuto) renderQueue();
+      void syncPlaybackStart().catch(() => {});
+    }
     async function playPlaylist(id) {
       const first = firstPlayableTrack();
       if (first?.id) {
@@ -3617,6 +3665,26 @@ async function handleWebApi(req, res) {
         return;
       }
       const state = await playTrackById(id, { quality: body.quality ?? "exhigh" });
+      jsonResponse(res, 200, {
+        success: true,
+        playback: playbackInfo(state),
+        lyrics: state.lyrics ?? [],
+        position: 0,
+        duration: Number(state.durationMs ?? 0) / 1000,
+        active: true,
+        paused: false,
+        ai_context: buildStartContext(state),
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/replay-track") {
+      const body = await readRequestJson(req);
+      const id = String(body.id ?? "").trim();
+      if (!id) {
+        jsonResponse(res, 400, { success: false, message: "id is required" });
+        return;
+      }
+      const state = await replayCurrentTrackFromStart(id);
       jsonResponse(res, 200, {
         success: true,
         playback: playbackInfo(state),
