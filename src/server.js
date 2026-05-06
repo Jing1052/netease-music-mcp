@@ -3130,24 +3130,27 @@ function playerHtml() {
       const p = data.playback || {};
       const pendingId = currentContext?.playback?.id ? String(currentContext.playback.id) : "";
       const incomingId = p.id ? String(p.id) : "";
-      if (playbackProgressPending && pendingId && incomingId && incomingId !== pendingId) {
-        const startGuardActive = Boolean(
-          playbackStartGuard &&
-          playbackStartGuard.trackId === pendingId &&
-          Date.now() < playbackStartGuard.expiresAt
-        );
-        if (startGuardActive) return false;
-        playbackStartGuard = null;
-        if (!allowExternalChange) return false;
-        playbackProgressPending = false;
-      }
-      $("song").textContent = p.name || "未播放";
-      $("meta").textContent = p.artist || "等待点歌";
       const duration = Number(data?.status?.duration ?? data?.duration ?? 0);
       const position = Number(data?.position ?? 0);
       const hasPlayback = Boolean(p.id || p.name);
       const nextActive = Boolean(hasPlayback && data?.active);
       const nextPaused = hasPlayback ? Boolean(data?.paused) : true;
+      if (playbackProgressPending && pendingId) {
+        const startGuardActive = Boolean(
+          playbackStartGuard &&
+          playbackStartGuard.trackId === pendingId &&
+          Date.now() < playbackStartGuard.expiresAt
+        );
+        const targetConfirmed = incomingId === pendingId && nextActive && !nextPaused;
+        if (startGuardActive && !targetConfirmed) return false;
+        playbackStartGuard = null;
+        if (incomingId && incomingId !== pendingId) {
+          if (!allowExternalChange) return false;
+          playbackProgressPending = false;
+        }
+      }
+      $("song").textContent = p.name || "未播放";
+      $("meta").textContent = p.artist || "等待点歌";
       const wasPending = playbackProgressPending;
       const now = Date.now();
       const guard = playbackControlGuard;
@@ -3250,6 +3253,9 @@ function playerHtml() {
       }
       const durationMs = Number(result?.playback?.durationMs ?? 0);
       if (durationMs) playbackDuration = durationMs / 1000;
+      const requestedId = String(id);
+      const resultPlayback = result?.playback || null;
+      const resultMatchesRequest = resultPlayback?.id && String(resultPlayback.id) === requestedId;
       currentContext = {
         ...(currentContext || {}),
         success: true,
@@ -3257,8 +3263,8 @@ function playerHtml() {
         paused: false,
         position: 0,
         duration: playbackDuration,
-        playback: result?.playback || currentContext?.playback || {},
-        lyrics: result?.lyrics || currentContext?.lyrics || [],
+        playback: resultMatchesRequest ? resultPlayback : (currentContext?.playback || {}),
+        lyrics: resultMatchesRequest ? (result?.lyrics || currentContext?.lyrics || []) : (currentContext?.lyrics || []),
         current_lyrics: [],
       };
       playbackActive = true;
