@@ -16,6 +16,7 @@ const rootDir = path.resolve(__dirname, "..");
 const statePath = path.join(rootDir, ".listening-state.json");
 let webPlayerServer = null;
 let webPlayerPort = null;
+let playbackOperation = Promise.resolve();
 
 const appData = process.env.APPDATA ?? "";
 const neteaseCliScript = path.join(appData, "npm", "node_modules", "neteasecli", "dist", "index.js");
@@ -177,6 +178,31 @@ async function stopPlaybackBestEffort() {
   const mpvStop = await stopMpvProcesses();
   await clearState();
   return { playerStop, mpvStop };
+}
+
+async function stopActivePlaybackBestEffort() {
+  let playerStop = null;
+  try {
+    playerStop = parseJson((await runNetease(["--pretty", "player", "stop"])).stdout, "neteasecli player stop");
+  } catch (error) {
+    playerStop = { success: false, message: String(error.message ?? error) };
+  }
+  const mpvStop = await stopMpvProcesses();
+  return { playerStop, mpvStop };
+}
+
+async function withPlaybackLock(action) {
+  const previous = playbackOperation.catch(() => {});
+  let release;
+  playbackOperation = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await action();
+  } finally {
+    release();
+  }
 }
 
 async function closeWebPlayerBestEffort() {
@@ -745,37 +771,40 @@ async function restartCachedTrack(reason = "restart") {
 }
 
 async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
-  const [detail, lyricData, wikiMetadata] = await Promise.all([
-    getTrackDetail(id),
-    getLyrics(id),
-    getTrackWikiMetadata(id).catch((error) => ({
+  return withPlaybackLock(async () => {
+    const [detail, lyricData, wikiMetadata] = await Promise.all([
+      getTrackDetail(id),
+      getLyrics(id),
+      getTrackWikiMetadata(id).catch((error) => ({
+        id: String(id),
+        source: "netease_song_wiki",
+        genres: [],
+        genre: "",
+        recommended_tags: [],
+        language: "",
+        error: String(error.message ?? error),
+      })),
+    ]);
+    const resolvedStyle = inferStyle(detail, style, wikiMetadata);
+    await stopActivePlaybackBestEffort();
+    await runNetease(["track", "play", String(id), "--quality", quality], { timeout: 45000 });
+    const state = {
       id: String(id),
-      source: "netease_song_wiki",
-      genres: [],
-      genre: "",
-      recommended_tags: [],
-      language: "",
-      error: String(error.message ?? error),
-    })),
-  ]);
-  const resolvedStyle = inferStyle(detail, style, wikiMetadata);
-  await runNetease(["track", "play", String(id), "--quality", quality], { timeout: 45000 });
-  const state = {
-    id: String(id),
-    name: detail.name,
-    artist: detail.artist,
-    album: detail.album,
-    durationMs: detail.durationMs,
-    coverUrl: detail.albumPicUrl,
-    style: resolvedStyle,
-    firstLyrics: firstLyricLines(lyricData.lines, 4),
-    lyrics: lyricData.lines,
-    wiki: wikiMetadata,
-    quality,
-    startedAt: new Date().toISOString(),
-  };
-  await writeState(state);
-  return state;
+      name: detail.name,
+      artist: detail.artist,
+      album: detail.album,
+      durationMs: detail.durationMs,
+      coverUrl: detail.albumPicUrl,
+      style: resolvedStyle,
+      firstLyrics: firstLyricLines(lyricData.lines, 4),
+      lyrics: lyricData.lines,
+      wiki: wikiMetadata,
+      quality,
+      startedAt: new Date().toISOString(),
+    };
+    await writeState(state);
+    return state;
+  });
 }
 
 async function toggleOrRestartPlayback() {
