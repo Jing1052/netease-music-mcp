@@ -1109,7 +1109,7 @@ function playerHtml() {
       background: rgba(255,255,255,.06);
       border: 1px solid var(--line);
       border-radius: 20px;
-      padding: 7px 8px 7px 14px;
+      padding: 7px 8px 7px 16px;
     }
     .search .icon-btn svg {
       width: 15px;
@@ -1357,8 +1357,11 @@ function playerHtml() {
       overflow-y: auto;
       padding-right: 4px;
     }
-    .playlist-detail {
+    .playlist-detail,
+    .search-view {
       --detail-grid: 42px 42px clamp(300px, 46vw, 500px) clamp(120px, 18vw, 220px) 48px minmax(0, 1fr) 32px;
+    }
+    .playlist-detail {
       display: grid;
       gap: 18px;
       min-height: 0;
@@ -2408,7 +2411,6 @@ function playerHtml() {
     <section class="content">
       <div class="topbar">
         <div class="search">
-          <span>⌕</span>
           <input id="keyword" placeholder="搜索歌曲、歌手、专辑..." />
           <button class="icon-btn" id="searchButton" title="搜索" aria-label="搜索">
             <svg viewBox="0 0 24 24" aria-hidden="true">
