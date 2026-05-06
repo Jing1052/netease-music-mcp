@@ -2713,10 +2713,10 @@ function playerHtml() {
       updateProgressUi(localPosition, playbackDuration);
       updateVinylWave();
       updateLyricHighlight(localPosition);
-      if (playbackDuration && playbackActive && !playbackPaused && localPosition < playbackDuration - 1) {
+      if (!playbackProgressPending && playbackDuration && playbackActive && !playbackPaused && localPosition < playbackDuration - 1) {
         autoAdvanceArmed = true;
       }
-      if (autoAdvanceArmed && Date.now() >= autoAdvanceCooldownUntil && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
+      if (!playbackProgressPending && autoAdvanceArmed && Date.now() >= autoAdvanceCooldownUntil && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
         void playNextFromQueue().catch((error) => { $("status").textContent = error.message || "自动播放下一首失败"; });
       }
       requestAnimationFrame(updateLocalProgress);
@@ -3188,7 +3188,7 @@ function playerHtml() {
           playbackStartGuard.trackId === pendingId &&
           Date.now() < playbackStartGuard.expiresAt
         );
-        const targetConfirmed = incomingId === pendingId && nextActive && !nextPaused;
+        const targetConfirmed = incomingId === pendingId && nextActive && !nextPaused && position <= 5;
         if (startGuardActive && !targetConfirmed) return false;
         playbackStartGuard = null;
         if (incomingId && incomingId !== pendingId) {
