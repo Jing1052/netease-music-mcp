@@ -751,16 +751,58 @@ function statusLooksEnded(statusData, fallbackDurationMs = 0) {
 async function currentListeningContext(_before = 0, after = 6) {
   const pendingState = activePendingPlaybackState();
   if (pendingState) {
+    const pendingMode = pendingState.pendingMode ?? "playback_start";
+    const pendingSince = Number(pendingState.pendingSince ?? 0);
+    const pendingAge = pendingSince ? Date.now() - pendingSince : 0;
+    if (pendingAge > 900 || pendingMode === "replay_wait") {
+      const status = await getPlayerStatus().catch(() => null);
+      const statusData = status?.data;
+      const statusDuration = Number(statusData?.duration ?? 0);
+      const stateDuration = Number(pendingState.durationMs ?? 0) / 1000;
+      const statusTitle = String(statusData?.title ?? "").trim().toLowerCase();
+      const pendingTitle = String(pendingState.name ?? "").trim().toLowerCase();
+      const titleMatches = Boolean(
+        statusTitle &&
+        pendingTitle &&
+        (statusTitle === pendingTitle || statusTitle.includes(pendingTitle) || pendingTitle.includes(statusTitle))
+      );
+      const titleUnavailable = !statusTitle || !pendingTitle;
+      const durationMatches = !statusDuration || !stateDuration || Math.abs(statusDuration - stateDuration) <= 2.5;
+      const startPosition = Number(statusData?.position ?? 0);
+      const canReleasePending = pendingMode === "replay_wait"
+        ? pendingAge > 3200 && Boolean(statusData?.playing) && !statusData?.paused && startPosition <= 5
+        : Boolean(statusData?.playing) && !statusData?.paused && durationMatches && (titleMatches || (titleUnavailable && startPosition <= 8 && pendingAge > 1500));
+      if (canReleasePending) {
+        clearPendingPlaybackState();
+        const position = Number(statusData?.position ?? 0);
+        const duration = stateDuration || statusDuration;
+        const currentLines = upcomingLyricLines(pendingState.lyrics ?? [], position, Number(after || 6));
+        return {
+          success: true,
+          active: true,
+          paused: false,
+          position,
+          duration,
+          positionFormatted: statusData?.positionFormatted,
+          durationFormatted: statusData?.durationFormatted,
+          status: statusData,
+          playback: playbackInfo(pendingState),
+          current_lyrics: currentLines,
+          lyrics: pendingState.lyrics ?? [],
+          ai_context: buildCurrentContext(pendingState, currentLines),
+        };
+      }
+    }
     const currentLines = upcomingLyricLines(pendingState.lyrics ?? [], 0, Number(after || 6));
     return {
       success: true,
-      active: true,
+      active: false,
       paused: false,
       position: 0,
       duration: Number(pendingState.durationMs ?? 0) / 1000,
       positionFormatted: "0:00",
       durationFormatted: "",
-      status: { playing: true, paused: false, pending: true, position: 0 },
+      status: { playing: false, paused: false, pending: true, pendingMode, position: 0 },
       playback: playbackInfo(pendingState),
       current_lyrics: currentLines,
       lyrics: pendingState.lyrics ?? [],
@@ -844,7 +886,7 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
       quality,
       startedAt: new Date().toISOString(),
     };
-    pendingPlaybackState = state;
+    pendingPlaybackState = { ...state, pendingMode: "playback_start", pendingSince: Date.now() };
     pendingPlaybackExpiresAt = Date.now() + 60000;
     clearReplayRequestGuard();
     await writeState(state);
@@ -854,10 +896,11 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
       await runNetease(["track", "play", String(id), "--quality", quality], { timeout: 45000 });
       await writeState(state);
       return state;
-    } finally {
+    } catch (error) {
       if (pendingPlaybackState?.id === String(id)) {
         clearPendingPlaybackState();
       }
+      throw error;
     }
   });
 }
@@ -881,21 +924,27 @@ async function replayCurrentTrackFromStart(id) {
     }
     const replayState = { ...state, startedAt: new Date().toISOString() };
     replayRequestGuard = { id: requestedId, expiresAt: Date.now() + 8000 };
-    pendingPlaybackState = replayState;
+    pendingPlaybackState = { ...replayState, pendingMode: "replay_wait", pendingSince: Date.now() };
     pendingPlaybackExpiresAt = Date.now() + 15000;
     await writeState(replayState);
     try {
-      await runNetease(["--pretty", "player", "seek", "--absolute", "0"], { timeout: 10000 });
+      await delay(3000);
+      try {
+        await runNetease(["--pretty", "player", "seek", "--absolute", "0"], { timeout: 10000 });
+      } catch {
+        await runNetease(["track", "play", requestedId, "--quality", replayState.quality ?? "exhigh"], { timeout: 45000 });
+      }
       await delay(150);
       const status = await getPlayerStatus().catch(() => null);
       if (status?.data?.paused) {
         await runNetease(["--pretty", "player", "pause"], { timeout: 10000 });
       }
       return replayState;
-    } finally {
+    } catch (error) {
       if (pendingPlaybackState?.id === requestedId) {
         clearPendingPlaybackState();
       }
+      throw error;
     }
   });
 }
@@ -2531,6 +2580,7 @@ function playerHtml() {
     let playbackControlPendingUntil = 0;
     let playbackControlGuard = null;
     let playbackSeekGuard = null;
+    let playbackReplayGuard = null;
     let activeLyricIndex = -1;
     let renderedLyricsKey = "";
     let playCloseTimer = null;
@@ -2682,6 +2732,12 @@ function playerHtml() {
         $("playerTimelineTip").textContent = clockText(safePosition) + " / " + (safeDuration ? clockText(safeDuration) : "--:--");
       }
     }
+    function armReplayGuard(id, ms = 8000) {
+      playbackReplayGuard = {
+        trackId: id ? String(id) : "",
+        expiresAt: Date.now() + ms,
+      };
+    }
     function updateTimelineHover(event) {
       const rect = $("playerTimeline").getBoundingClientRect();
       timelineHoverRatio = rect.width ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : 0;
@@ -2761,13 +2817,14 @@ function playerHtml() {
     }
     function updateLocalProgress() {
       const localPosition = computedPlaybackPosition();
+      const replayGuardActive = Boolean(playbackReplayGuard && Date.now() < playbackReplayGuard.expiresAt);
       updateProgressUi(localPosition, playbackDuration);
       updateVinylWave();
       updateLyricHighlight(localPosition);
-      if (!playbackProgressPending && playbackDuration && playbackActive && !playbackPaused && localPosition < playbackDuration - 1) {
+      if (!replayGuardActive && !playbackProgressPending && playbackDuration && playbackActive && !playbackPaused && localPosition < playbackDuration - 1) {
         autoAdvanceArmed = true;
       }
-      if (!playbackProgressPending && autoAdvanceArmed && Date.now() >= autoAdvanceCooldownUntil && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
+      if (!replayGuardActive && !playbackProgressPending && autoAdvanceArmed && Date.now() >= autoAdvanceCooldownUntil && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
         void playNextFromQueue().catch((error) => { $("status").textContent = error.message || "自动播放下一首失败"; });
       }
       requestAnimationFrame(updateLocalProgress);
@@ -3151,7 +3208,7 @@ function playerHtml() {
       playbackProgressPending = true;
       playbackStartGuard = {
         trackId: fallbackId,
-        expiresAt: Date.now() + 8000,
+        expiresAt: Date.now() + 20000,
       };
       playbackSyncedAt = Date.now();
       activeLyricIndex = -1;
@@ -3235,21 +3292,28 @@ function playerHtml() {
       const incomingId = p.id ? String(p.id) : "";
       const duration = Number(data?.status?.duration ?? data?.duration ?? 0);
       const position = Number(data?.position ?? 0);
+      const contextPending = Boolean(data?.status?.pending);
       const hasPlayback = Boolean(p.id || p.name);
       const nextActive = Boolean(hasPlayback && data?.active);
       const nextPaused = hasPlayback ? Boolean(data?.paused) : true;
+      const replayGuard = playbackReplayGuard;
+      const sameReplayTrack = Boolean(replayGuard && (!replayGuard.trackId || !incomingId || replayGuard.trackId === incomingId));
+      if (replayGuard && Date.now() >= replayGuard.expiresAt) {
+        playbackReplayGuard = null;
+      } else if (sameReplayTrack && position > 10) {
+        return false;
+      }
       if (playbackProgressPending && pendingId) {
         const startGuardActive = Boolean(
           playbackStartGuard &&
           playbackStartGuard.trackId === pendingId &&
           Date.now() < playbackStartGuard.expiresAt
         );
-        const targetConfirmed = incomingId === pendingId && nextActive && !nextPaused && position <= 5;
+        const targetConfirmed = incomingId === pendingId && nextActive && !nextPaused && !contextPending;
         if (startGuardActive && !targetConfirmed) return false;
         playbackStartGuard = null;
         if (incomingId && incomingId !== pendingId) {
-          if (!allowExternalChange) return false;
-          playbackProgressPending = false;
+          return false;
         }
       }
       $("song").textContent = p.name || "未播放";
@@ -3275,8 +3339,12 @@ function playerHtml() {
       playbackDuration = duration || playbackDuration;
       if (controlPending) {
         playbackPosition = playbackPaused ? playbackPosition : computedPlaybackPosition();
-      } else if (wasPending && nextActive && !nextPaused) {
+      } else if (contextPending && incomingId === pendingId) {
         playbackPosition = 0;
+        playbackActive = true;
+        playbackPaused = false;
+      } else if (wasPending && nextActive && !nextPaused) {
+        playbackPosition = position;
         playbackActive = true;
         playbackPaused = false;
         playbackProgressPending = false;
@@ -3366,12 +3434,14 @@ function playerHtml() {
       const requestedId = String(id);
       const resultPlayback = result?.playback || null;
       const resultMatchesRequest = resultPlayback?.id && String(resultPlayback.id) === requestedId;
+      const alreadySynced = !playbackProgressPending && currentContext?.playback?.id && String(currentContext.playback.id) === requestedId;
+      const nextPosition = alreadySynced ? computedPlaybackPosition() : 0;
       currentContext = {
         ...(currentContext || {}),
         success: true,
         active: true,
         paused: false,
-        position: 0,
+        position: nextPosition,
         duration: playbackDuration,
         playback: resultMatchesRequest ? resultPlayback : (currentContext?.playback || {}),
         lyrics: resultMatchesRequest ? (result?.lyrics || currentContext?.lyrics || []) : (currentContext?.lyrics || []),
@@ -3379,7 +3449,7 @@ function playerHtml() {
       };
       playbackActive = true;
       playbackPaused = false;
-      playbackPosition = 0;
+      playbackPosition = nextPosition;
       playbackSyncedAt = Date.now();
       autoAdvanceArmed = !fromAuto;
       if (currentContext.playback?.name) $("song").textContent = currentContext.playback.name;
@@ -3396,16 +3466,21 @@ function playerHtml() {
     async function replayTrack(id, { fromAuto = false, optimisticTrack = null } = {}) {
       $("status").textContent = "重播中";
       optimisticPlayback(optimisticTrack || findKnownTrack(id), id);
+      armReplayGuard(id);
       const result = await api("/api/replay-track", { id });
       const durationMs = Number(result?.playback?.durationMs ?? 0);
       if (durationMs) playbackDuration = durationMs / 1000;
+      const requestedId = String(id);
+      const alreadySynced = !playbackProgressPending && currentContext?.playback?.id && String(currentContext.playback.id) === requestedId;
+      const nextPosition = alreadySynced ? computedPlaybackPosition() : 0;
       playbackActive = true;
       playbackPaused = false;
-      playbackPosition = 0;
+      playbackPosition = nextPosition;
       playbackSyncedAt = Date.now();
+      armReplayGuard(id);
       autoAdvanceArmed = !fromAuto;
       setPlaybackButtonIcon(true, false);
-      updateProgressUi(0, playbackDuration);
+      updateProgressUi(playbackPosition, playbackDuration);
       if (playerOverlayOpen && currentContext) renderPlayerPage(currentContext);
       if (!fromAuto) renderQueue();
       void syncPlaybackStart().catch(() => {});
@@ -3683,7 +3758,17 @@ async function handleWebApi(req, res) {
         jsonResponse(res, 400, { success: false, message: "id is required" });
         return;
       }
-      const state = await playTrackById(id, { quality: body.quality ?? "exhigh" });
+      const cachedState = await readState();
+      let state;
+      if (cachedState?.id && String(cachedState.id) === id) {
+        try {
+          state = await replayCurrentTrackFromStart(id);
+        } catch {
+          state = await playTrackById(id, { quality: body.quality ?? "exhigh" });
+        }
+      } else {
+        state = await playTrackById(id, { quality: body.quality ?? "exhigh" });
+      }
       jsonResponse(res, 200, {
         success: true,
         playback: playbackInfo(state),
