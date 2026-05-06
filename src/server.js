@@ -141,6 +141,10 @@ async function clearState() {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function stopMpvProcesses() {
   if (process.platform !== "win32") {
     try {
@@ -836,8 +840,10 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
     };
     pendingPlaybackState = state;
     pendingPlaybackExpiresAt = Date.now() + 60000;
+    await writeState(state);
     try {
       await stopActivePlaybackBestEffort();
+      await delay(250);
       await runNetease(["track", "play", String(id), "--quality", quality], { timeout: 45000 });
       await writeState(state);
       return state;
