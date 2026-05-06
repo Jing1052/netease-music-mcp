@@ -19,6 +19,7 @@ let webPlayerPort = null;
 let playbackOperation = Promise.resolve();
 let pendingPlaybackState = null;
 let pendingPlaybackExpiresAt = 0;
+let replayRequestGuard = null;
 
 const appData = process.env.APPDATA ?? "";
 const neteaseCliScript = path.join(appData, "npm", "node_modules", "neteasecli", "dist", "index.js");
@@ -176,6 +177,7 @@ async function stopMpvProcesses() {
 
 async function stopPlaybackBestEffort() {
   clearPendingPlaybackState();
+  clearReplayRequestGuard();
   let playerStop = null;
   try {
     playerStop = parseJson((await runNetease(["--pretty", "player", "stop"])).stdout, "neteasecli player stop");
@@ -722,6 +724,10 @@ function clearPendingPlaybackState() {
   pendingPlaybackExpiresAt = 0;
 }
 
+function clearReplayRequestGuard() {
+  replayRequestGuard = null;
+}
+
 function buildStartContext(state) {
   return `我们正在一起听歌，你现在跟我一起听${state.name}，曲风是${state.style}，歌手是${state.artist}，前4句歌词是${state.firstLyrics.join(" / ")}`;
 }
@@ -840,6 +846,7 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
     };
     pendingPlaybackState = state;
     pendingPlaybackExpiresAt = Date.now() + 60000;
+    clearReplayRequestGuard();
     await writeState(state);
     try {
       await stopActivePlaybackBestEffort();
@@ -856,12 +863,24 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
 }
 
 async function replayCurrentTrackFromStart(id) {
+  const requestedId = String(id);
+  const now = Date.now();
+  if (replayRequestGuard?.id === requestedId && now < replayRequestGuard.expiresAt) {
+    const guardedState = await readState();
+    if (guardedState?.id && String(guardedState.id) === requestedId) return guardedState;
+  }
   return withPlaybackLock(async () => {
+    const lockedNow = Date.now();
+    if (replayRequestGuard?.id === requestedId && lockedNow < replayRequestGuard.expiresAt) {
+      const guardedState = await readState();
+      if (guardedState?.id && String(guardedState.id) === requestedId) return guardedState;
+    }
     const state = await readState();
-    if (!state?.id || String(state.id) !== String(id)) {
+    if (!state?.id || String(state.id) !== requestedId) {
       throw new Error("Cached track does not match the requested replay target");
     }
     const replayState = { ...state, startedAt: new Date().toISOString() };
+    replayRequestGuard = { id: requestedId, expiresAt: Date.now() + 8000 };
     pendingPlaybackState = replayState;
     pendingPlaybackExpiresAt = Date.now() + 15000;
     await writeState(replayState);
@@ -874,7 +893,7 @@ async function replayCurrentTrackFromStart(id) {
       }
       return replayState;
     } finally {
-      if (pendingPlaybackState?.id === String(id)) {
+      if (pendingPlaybackState?.id === requestedId) {
         clearPendingPlaybackState();
       }
     }
@@ -3743,6 +3762,7 @@ async function handleWebApi(req, res) {
     }
     if (req.method === "POST" && url.pathname === "/api/stop") {
       clearPendingPlaybackState();
+      clearReplayRequestGuard();
       const result = parseJson((await runNetease(["--pretty", "player", "stop"])).stdout, "neteasecli player stop");
       await clearState();
       jsonResponse(res, 200, { success: true, result });
