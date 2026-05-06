@@ -3060,13 +3060,14 @@ function playerHtml() {
       renderRecommended();
       renderCharts();
     }
-    async function refresh() {
+    async function refresh({ allowExternalChange = false } = {}) {
       const data = await api("/api/context");
       const p = data.playback || {};
       const pendingId = currentContext?.playback?.id ? String(currentContext.playback.id) : "";
       const incomingId = p.id ? String(p.id) : "";
       if (playbackProgressPending && pendingId && incomingId && incomingId !== pendingId) {
-        return false;
+        if (!allowExternalChange) return false;
+        playbackProgressPending = false;
       }
       $("song").textContent = p.name || "未播放";
       $("meta").textContent = p.artist || "等待点歌";
@@ -3110,11 +3111,12 @@ function playerHtml() {
       if (playerOverlayOpen) renderPlayerPage(currentContext);
       return true;
     }
-    async function syncContextFromCli({ requirePlayerOverlay = false } = {}) {
-      if ((requirePlayerOverlay && !playerOverlayOpen) || lyricSyncInFlight || playbackProgressPending) return;
+    async function syncContextFromCli({ requirePlayerOverlay = false, allowExternalChange = false } = {}) {
+      if ((requirePlayerOverlay && !playerOverlayOpen) || lyricSyncInFlight) return;
+      if (playbackProgressPending && !allowExternalChange) return;
       lyricSyncInFlight = true;
       try {
-        await refresh();
+        await refresh({ allowExternalChange });
       } catch {
         // Keep the local UI alive if the player status is briefly unavailable.
       } finally {
@@ -3328,7 +3330,7 @@ function playerHtml() {
     buildWave();
     loadDashboard().catch((error) => { $("charts").innerHTML = '<div class="empty">' + escapeHtml(error.message) + '</div>'; });
     refresh().catch(() => {});
-    setInterval(() => { void syncContextFromCli(); }, 2500);
+    setInterval(() => { void syncContextFromCli({ allowExternalChange: true }); }, 1000);
     setInterval(() => { void syncLyricFromCli(); }, 3000);
     requestAnimationFrame(updateLocalProgress);
   </script>
