@@ -3454,15 +3454,23 @@ function playerHtml() {
       const rect = $("playerTimeline").getBoundingClientRect();
       const ratio = rect.width ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : 0;
       const seconds = Math.round(ratio * playbackDuration);
-      $("playerTimelineFill").style.setProperty("--progress", (ratio * 100) + "%");
-      $("status").textContent = clockText(seconds);
+      const previousPosition = playbackPosition;
+      const previousSyncedAt = playbackSyncedAt;
+      playbackPosition = seconds;
+      playbackSyncedAt = Date.now();
+      updateProgressUi(seconds, playbackDuration);
+      updateLyricHighlight(seconds);
+      if (playerOverlayOpen && currentContext) {
+        currentContext = { ...currentContext, position: seconds };
+      }
       try {
         await api("/api/seek", { seconds });
-        playbackPosition = seconds;
-        playbackSyncedAt = Date.now();
-        updateProgressUi(seconds, playbackDuration);
-        await refresh();
+        void refresh().catch(() => {});
       } catch (error) {
+        playbackPosition = previousPosition;
+        playbackSyncedAt = previousSyncedAt;
+        updateProgressUi(computedPlaybackPosition(), playbackDuration);
+        updateLyricHighlight(computedPlaybackPosition());
         $("status").textContent = error.message || "跳转失败";
       }
     });
