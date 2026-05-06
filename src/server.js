@@ -2454,6 +2454,7 @@ function playerHtml() {
     let queueIndex = -1;
     let autoAdvanceInFlight = false;
     let autoAdvanceArmed = true;
+    let autoAdvanceCooldownUntil = 0;
     let playMode = "sequence";
     let activeView = "home";
     let recPage = 0;
@@ -2714,7 +2715,7 @@ function playerHtml() {
       if (playbackDuration && playbackActive && !playbackPaused && localPosition < playbackDuration - 1) {
         autoAdvanceArmed = true;
       }
-      if (autoAdvanceArmed && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
+      if (autoAdvanceArmed && Date.now() >= autoAdvanceCooldownUntil && playbackDuration && playbackActive && !playbackPaused && localPosition >= playbackDuration - .35) {
         void playNextFromQueue().catch((error) => { $("status").textContent = error.message || "自动播放下一首失败"; });
       }
       requestAnimationFrame(updateLocalProgress);
@@ -2753,6 +2754,7 @@ function playerHtml() {
       queueSource = source || "播放列表";
       queueIndex = playbackQueue.length ? Math.max(0, Math.min(playbackQueue.length - 1, Number(startIndex || 0))) : -1;
       autoAdvanceArmed = true;
+      autoAdvanceCooldownUntil = 0;
       renderQueue();
     }
     function renderQueue() {
@@ -2772,6 +2774,7 @@ function playerHtml() {
       const track = playbackQueue[nextIndex];
       if (!track?.id) return;
       queueIndex = nextIndex;
+      autoAdvanceCooldownUntil = Date.now() + 5000;
       renderQueue();
       await playTrack(track.id, { fromAuto, optimisticTrack: track });
     }
@@ -2798,6 +2801,7 @@ function playerHtml() {
       if (autoAdvanceInFlight) return;
       autoAdvanceInFlight = true;
       autoAdvanceArmed = false;
+      autoAdvanceCooldownUntil = Date.now() + 5000;
       try {
         if (!playbackQueue.length || queueIndex < 0) {
           const currentId = currentContext?.playback?.id;
@@ -3313,7 +3317,7 @@ function playerHtml() {
       playbackPaused = false;
       playbackPosition = 0;
       playbackSyncedAt = Date.now();
-      autoAdvanceArmed = true;
+      autoAdvanceArmed = !fromAuto;
       if (currentContext.playback?.name) $("song").textContent = currentContext.playback.name;
       $("meta").textContent = currentContext.playback?.artist || "正在播放";
       if (currentContext.playback?.coverUrl) {
