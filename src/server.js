@@ -2434,6 +2434,7 @@ function playerHtml() {
     let playbackProgressPending = false;
     let playbackSyncedAt = Date.now();
     let playbackControlPendingUntil = 0;
+    let playbackControlGuard = null;
     let activeLyricIndex = -1;
     let renderedLyricsKey = "";
     let playCloseTimer = null;
@@ -2520,7 +2521,13 @@ function playerHtml() {
       playbackActive = true;
       playbackPaused = nextPaused;
       playbackSyncedAt = Date.now();
-      playbackControlPendingUntil = Date.now() + 2500;
+      playbackControlPendingUntil = Date.now() + 6000;
+      playbackControlGuard = {
+        trackId: currentContext?.playback?.id ? String(currentContext.playback.id) : "",
+        active: true,
+        paused: nextPaused,
+        expiresAt: playbackControlPendingUntil,
+      };
       currentContext = {
         ...(currentContext || {}),
         active: playbackActive,
@@ -2532,15 +2539,6 @@ function playerHtml() {
       updateProgressUi(playbackPosition, playbackDuration);
       if (playerOverlayOpen) renderPlayerPage(currentContext);
       return true;
-    }
-    function schedulePlaybackSettleRefresh(delayMs = 1600) {
-      const until = Date.now() + delayMs;
-      playbackControlPendingUntil = Math.max(playbackControlPendingUntil, until);
-      setTimeout(() => {
-        if (Date.now() < playbackControlPendingUntil - 20) return;
-        playbackControlPendingUntil = 0;
-        void refresh().catch(() => {});
-      }, delayMs + 30);
     }
     function normalizeVolumeValue(volume) {
       const raw = Number(volume);
@@ -3139,7 +3137,16 @@ function playerHtml() {
       const nextActive = Boolean(hasPlayback && data?.active);
       const nextPaused = hasPlayback ? Boolean(data?.paused) : true;
       const wasPending = playbackProgressPending;
-      const controlPending = Date.now() < playbackControlPendingUntil && (!pendingId || !incomingId || pendingId === incomingId);
+      const now = Date.now();
+      const guard = playbackControlGuard;
+      const sameGuardTrack = Boolean(guard && (!guard.trackId || !incomingId || guard.trackId === incomingId));
+      const guardMatched = Boolean(guard && sameGuardTrack && nextActive === guard.active && nextPaused === guard.paused);
+      const guardActive = Boolean(guard && sameGuardTrack && now < guard.expiresAt && !guardMatched);
+      if (guardMatched || (guard && now >= guard.expiresAt)) {
+        playbackControlGuard = null;
+        playbackControlPendingUntil = 0;
+      }
+      const controlPending = guardActive || (now < playbackControlPendingUntil && (!pendingId || !incomingId || pendingId === incomingId));
       playbackDuration = duration || playbackDuration;
       if (controlPending) {
         playbackPosition = playbackPaused ? playbackPosition : computedPlaybackPosition();
@@ -3312,6 +3319,7 @@ function playerHtml() {
         const data = await api("/api/pause", {});
         if (data?.result?.mode === "restart" && data.result.playback) {
           playbackControlPendingUntil = 0;
+          playbackControlGuard = null;
           optimisticPlayback(data.result.playback, data.result.playback.id);
           currentContext = {
             ...(currentContext || {}),
@@ -3326,10 +3334,11 @@ function playerHtml() {
           };
           await syncPlaybackStart();
         } else {
-          schedulePlaybackSettleRefresh();
+          void refresh().catch(() => {});
         }
       } catch (error) {
         playbackControlPendingUntil = 0;
+        playbackControlGuard = null;
         playbackActive = previousState.active;
         playbackPaused = previousState.paused;
         playbackPosition = previousState.position;
