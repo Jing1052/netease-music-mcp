@@ -2433,6 +2433,7 @@ function playerHtml() {
     let playbackPaused = false;
     let playbackProgressPending = false;
     let playbackSyncedAt = Date.now();
+    let playbackControlPendingUntil = 0;
     let activeLyricIndex = -1;
     let renderedLyricsKey = "";
     let playCloseTimer = null;
@@ -2508,6 +2509,29 @@ function playerHtml() {
       button.classList.toggle("is-playing", isPlaying);
       button.title = isPlaying ? "暂停" : "播放";
       button.setAttribute("aria-label", isPlaying ? "暂停" : "播放");
+    }
+    function optimisticTogglePlaybackButton() {
+      const hasPlayback = Boolean(currentContext?.playback?.id || currentContext?.playback?.name || playbackActive);
+      if (!hasPlayback) return false;
+      const nextPaused = playbackActive && !playbackPaused;
+      if (nextPaused) {
+        playbackPosition = computedPlaybackPosition();
+      }
+      playbackActive = true;
+      playbackPaused = nextPaused;
+      playbackSyncedAt = Date.now();
+      playbackControlPendingUntil = Date.now() + 2500;
+      currentContext = {
+        ...(currentContext || {}),
+        active: playbackActive,
+        paused: playbackPaused,
+        position: playbackPosition,
+        duration: playbackDuration,
+      };
+      setPlaybackButtonIcon(playbackActive, playbackPaused);
+      updateProgressUi(playbackPosition, playbackDuration);
+      if (playerOverlayOpen) renderPlayerPage(currentContext);
+      return true;
     }
     function normalizeVolumeValue(volume) {
       const raw = Number(volume);
@@ -3106,8 +3130,11 @@ function playerHtml() {
       const nextActive = Boolean(hasPlayback && data?.active);
       const nextPaused = hasPlayback ? Boolean(data?.paused) : true;
       const wasPending = playbackProgressPending;
+      const controlPending = Date.now() < playbackControlPendingUntil && (!pendingId || !incomingId || pendingId === incomingId);
       playbackDuration = duration || playbackDuration;
-      if (wasPending && nextActive && !nextPaused) {
+      if (controlPending) {
+        playbackPosition = playbackPaused ? playbackPosition : computedPlaybackPosition();
+      } else if (wasPending && nextActive && !nextPaused) {
         playbackPosition = 0;
         playbackActive = true;
         playbackPaused = false;
@@ -3264,9 +3291,18 @@ function playerHtml() {
     });
     $("searchButton").onclick = () => { void searchKeyword().catch((error) => { $("status").textContent = error.message; }); };
     $("pause").onclick = async () => {
+      const previousState = {
+        active: playbackActive,
+        paused: playbackPaused,
+        position: playbackPosition,
+        syncedAt: playbackSyncedAt,
+        context: currentContext,
+      };
       try {
+        optimisticTogglePlaybackButton();
         const data = await api("/api/pause", {});
         if (data?.result?.mode === "restart" && data.result.playback) {
+          playbackControlPendingUntil = 0;
           optimisticPlayback(data.result.playback, data.result.playback.id);
           currentContext = {
             ...(currentContext || {}),
@@ -3281,9 +3317,19 @@ function playerHtml() {
           };
           await syncPlaybackStart();
         } else {
-          await refresh();
+          playbackControlPendingUntil = 0;
+          void refresh().catch(() => {});
         }
       } catch (error) {
+        playbackControlPendingUntil = 0;
+        playbackActive = previousState.active;
+        playbackPaused = previousState.paused;
+        playbackPosition = previousState.position;
+        playbackSyncedAt = previousState.syncedAt;
+        currentContext = previousState.context;
+        setPlaybackButtonIcon();
+        updateProgressUi(playbackPosition, playbackDuration);
+        if (playerOverlayOpen && currentContext) renderPlayerPage(currentContext);
         $("status").textContent = error.message || "播放失败";
       }
     };
