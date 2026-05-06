@@ -17,6 +17,8 @@ const statePath = path.join(rootDir, ".listening-state.json");
 let webPlayerServer = null;
 let webPlayerPort = null;
 let playbackOperation = Promise.resolve();
+let pendingPlaybackState = null;
+let pendingPlaybackExpiresAt = 0;
 
 const appData = process.env.APPDATA ?? "";
 const neteaseCliScript = path.join(appData, "npm", "node_modules", "neteasecli", "dist", "index.js");
@@ -169,6 +171,7 @@ async function stopMpvProcesses() {
 }
 
 async function stopPlaybackBestEffort() {
+  clearPendingPlaybackState();
   let playerStop = null;
   try {
     playerStop = parseJson((await runNetease(["--pretty", "player", "stop"])).stdout, "neteasecli player stop");
@@ -702,6 +705,19 @@ function playbackInfo(state) {
   };
 }
 
+function activePendingPlaybackState() {
+  if (!pendingPlaybackState) return null;
+  if (Date.now() <= pendingPlaybackExpiresAt) return pendingPlaybackState;
+  pendingPlaybackState = null;
+  pendingPlaybackExpiresAt = 0;
+  return null;
+}
+
+function clearPendingPlaybackState() {
+  pendingPlaybackState = null;
+  pendingPlaybackExpiresAt = 0;
+}
+
 function buildStartContext(state) {
   return `我们正在一起听歌，你现在跟我一起听${state.name}，曲风是${state.style}，歌手是${state.artist}，前4句歌词是${state.firstLyrics.join(" / ")}`;
 }
@@ -723,6 +739,24 @@ function statusLooksEnded(statusData, fallbackDurationMs = 0) {
 }
 
 async function currentListeningContext(_before = 0, after = 6) {
+  const pendingState = activePendingPlaybackState();
+  if (pendingState) {
+    const currentLines = upcomingLyricLines(pendingState.lyrics ?? [], 0, Number(after || 6));
+    return {
+      success: true,
+      active: true,
+      paused: false,
+      position: 0,
+      duration: Number(pendingState.durationMs ?? 0) / 1000,
+      positionFormatted: "0:00",
+      durationFormatted: "",
+      status: { playing: true, paused: false, pending: true, position: 0 },
+      playback: playbackInfo(pendingState),
+      current_lyrics: currentLines,
+      lyrics: pendingState.lyrics ?? [],
+      ai_context: buildCurrentContext(pendingState, currentLines),
+    };
+  }
   const state = await readState();
   if (!state) {
     return { success: true, active: false, ai_context: "" };
@@ -786,8 +820,6 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
       })),
     ]);
     const resolvedStyle = inferStyle(detail, style, wikiMetadata);
-    await stopActivePlaybackBestEffort();
-    await runNetease(["track", "play", String(id), "--quality", quality], { timeout: 45000 });
     const state = {
       id: String(id),
       name: detail.name,
@@ -802,8 +834,18 @@ async function playTrackById(id, { quality = "exhigh", style = "" } = {}) {
       quality,
       startedAt: new Date().toISOString(),
     };
-    await writeState(state);
-    return state;
+    pendingPlaybackState = state;
+    pendingPlaybackExpiresAt = Date.now() + 60000;
+    try {
+      await stopActivePlaybackBestEffort();
+      await runNetease(["track", "play", String(id), "--quality", quality], { timeout: 45000 });
+      await writeState(state);
+      return state;
+    } finally {
+      if (pendingPlaybackState?.id === String(id)) {
+        clearPendingPlaybackState();
+      }
+    }
   });
 }
 
@@ -3598,6 +3640,7 @@ async function handleWebApi(req, res) {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/stop") {
+      clearPendingPlaybackState();
       const result = parseJson((await runNetease(["--pretty", "player", "stop"])).stdout, "neteasecli player stop");
       await clearState();
       jsonResponse(res, 200, { success: true, result });
