@@ -1276,6 +1276,13 @@ function playerHtml() {
       height: 100%;
       min-height: 0;
     }
+    .rec-page-loading {
+      grid-column: 1 / -1;
+      height: 100%;
+      min-height: 96px;
+      display: grid;
+      place-items: center;
+    }
     .pager-actions {
       display: flex;
       gap: 14px;
@@ -2595,6 +2602,8 @@ function playerHtml() {
     let playbackVolume = 80;
     let volumeUserControlled = false;
     let volumeSyncInFlight = false;
+    let volumeQueuedValue = null;
+    let volumeApplyTimer = null;
     let recPageSize = 7;
     const lyricLeadSeconds = 2.85;
     const playIconSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.25 6.5v11l8.5-5.5z"/></svg>';
@@ -2709,13 +2718,35 @@ function playerHtml() {
     }
     async function applyPlayerVolume(volume = playbackVolume) {
       const value = normalizeVolumeValue(volume);
-      if (value === null || volumeSyncInFlight) return;
+      if (value === null) return;
+      if (volumeSyncInFlight) {
+        volumeQueuedValue = value;
+        return;
+      }
       volumeSyncInFlight = true;
       try {
         await api("/api/volume", { volume: value });
       } finally {
         volumeSyncInFlight = false;
+        if (volumeQueuedValue !== null && volumeQueuedValue !== value) {
+          const nextValue = volumeQueuedValue;
+          volumeQueuedValue = null;
+          void applyPlayerVolume(nextValue);
+        } else {
+          volumeQueuedValue = null;
+        }
       }
+    }
+    function schedulePlayerVolume(volume = playbackVolume) {
+      const value = normalizeVolumeValue(volume);
+      if (value === null) return;
+      if (volumeApplyTimer) clearTimeout(volumeApplyTimer);
+      volumeApplyTimer = setTimeout(() => {
+        volumeApplyTimer = null;
+        void applyPlayerVolume(value).catch((error) => {
+          $("status").textContent = error.message || "音量设置失败";
+        });
+      }, 90);
     }
     function updatePlayModeUi() {
       $("sequenceMode").classList.toggle("active", playMode === "sequence");
@@ -3005,6 +3036,26 @@ function playerHtml() {
       )).join("");
       applyRecCardColors();
     }
+    function setRecommendedPagerLoading(isLoading) {
+      $("prevRecPage").disabled = Boolean(isLoading);
+      $("nextRecPage").disabled = Boolean(isLoading);
+      if (isLoading) {
+        $("recs").innerHTML = '<div class="empty rec-page-loading">加载中...</div>';
+      }
+    }
+    function preloadRecommendedCovers(items) {
+      const covers = items.map((item) => item.coverUrl).filter(Boolean);
+      if (!covers.length) return Promise.resolve();
+      return Promise.all(covers.map((src) => new Promise((resolve) => {
+        const img = new Image();
+        const done = () => resolve();
+        const timer = setTimeout(done, 2200);
+        img.onload = () => { clearTimeout(timer); done(); };
+        img.onerror = () => { clearTimeout(timer); done(); };
+        img.referrerPolicy = "no-referrer";
+        img.src = src;
+      })));
+    }
     async function loadMoreRecommendedPlaylists(minCount = recPageSize) {
       if (recommendedLoadingMore || !recommendedHasMore) return;
       recommendedLoadingMore = true;
@@ -3023,14 +3074,19 @@ function playerHtml() {
       }
     }
     async function nextRecommendedPage() {
+      if (recommendedLoadingMore) return;
       const nextPage = recPage + 1;
       const needed = (nextPage + 1) * recPageSize;
+      setRecommendedPagerLoading(true);
       if (needed > (dashboard.recommended_playlists || []).length && recommendedHasMore) {
         await loadMoreRecommendedPlaylists(needed - (dashboard.recommended_playlists || []).length);
       }
       const totalPages = Math.max(1, Math.ceil((dashboard.recommended_playlists || []).length / recPageSize));
       recPage = nextPage >= totalPages ? 0 : nextPage;
+      const start = recPage * recPageSize;
+      await preloadRecommendedCovers((dashboard.recommended_playlists || []).slice(start, start + recPageSize));
       renderRecommended();
+      setRecommendedPagerLoading(false);
     }
     function applyRecCardColors() {
       document.querySelectorAll(".rec").forEach((card) => {
@@ -3646,13 +3702,20 @@ function playerHtml() {
     });
     $("volumeSlider").addEventListener("input", (event) => {
       volumeUserControlled = true;
-      updateVolumeUi(event.target.value);
+      const volume = normalizeVolumeValue(event.target.value);
+      if (volume === null) return;
+      updateVolumeUi(volume);
+      schedulePlayerVolume(volume);
     });
     $("volumeSlider").addEventListener("change", async (event) => {
       volumeUserControlled = true;
       const volume = normalizeVolumeValue(event.target.value);
       if (volume === null) return;
       updateVolumeUi(volume);
+      if (volumeApplyTimer) {
+        clearTimeout(volumeApplyTimer);
+        volumeApplyTimer = null;
+      }
       try {
         await applyPlayerVolume(volume);
       } catch (error) {
