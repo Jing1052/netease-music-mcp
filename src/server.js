@@ -2392,6 +2392,8 @@ function playerHtml() {
     let timelineHovering = false;
     let timelineHoverRatio = 0;
     let playbackVolume = 80;
+    let volumeUserControlled = false;
+    let volumeSyncInFlight = false;
     let recPageSize = 7;
     const lyricLeadSeconds = 2.1;
     const playIconSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.25 6.5v11l8.5-5.5z"/></svg>';
@@ -2458,15 +2460,32 @@ function playerHtml() {
       button.title = isPlaying ? "暂停" : "播放";
       button.setAttribute("aria-label", isPlaying ? "暂停" : "播放");
     }
+    function normalizeVolumeValue(volume) {
+      const raw = Number(volume);
+      if (!Number.isFinite(raw)) return null;
+      const scaled = raw > 0 && raw <= 1 ? raw * 100 : raw;
+      return Math.max(0, Math.min(100, Math.round(scaled)));
+    }
     function updateVolumeUi(volume = playbackVolume) {
       const slider = $("volumeSlider");
       if (!slider) return;
-      const value = Math.max(0, Math.min(100, Math.round(Number(volume || 0))));
+      const value = normalizeVolumeValue(volume);
+      if (value === null) return;
       playbackVolume = value;
       slider.value = String(value);
       slider.style.setProperty("--volume", value + "%");
       slider.title = "音量 " + value + "%";
       slider.setAttribute("aria-valuetext", value + "%");
+    }
+    async function applyPlayerVolume(volume = playbackVolume) {
+      const value = normalizeVolumeValue(volume);
+      if (value === null || volumeSyncInFlight) return;
+      volumeSyncInFlight = true;
+      try {
+        await api("/api/volume", { volume: value });
+      } finally {
+        volumeSyncInFlight = false;
+      }
     }
     function updatePlayModeUi() {
       $("sequenceMode").classList.toggle("active", playMode === "sequence");
@@ -3033,7 +3052,9 @@ function playerHtml() {
         duration: playbackDuration,
       };
       setPlaybackButtonIcon();
-      if (Number.isFinite(Number(data?.status?.volume))) updateVolumeUi(Number(data.status.volume));
+      if (!volumeUserControlled && Number.isFinite(Number(data?.status?.volume))) {
+        updateVolumeUi(Number(data.status.volume));
+      }
       updateProgressUi(playbackPosition, playbackDuration);
       $("lyricLine").textContent = (data.current_lyrics || []).slice(0, 2).join(" / ");
       if (p.coverUrl) $("nowCover").src = p.coverUrl;
@@ -3089,6 +3110,9 @@ function playerHtml() {
       $("status").textContent = "播放中";
       optimisticPlayback(optimisticTrack || findKnownTrack(id), id);
       const result = await api("/api/play-track", { id });
+      if (volumeUserControlled) {
+        void applyPlayerVolume(playbackVolume).catch(() => {});
+      }
       const durationMs = Number(result?.playback?.durationMs ?? 0);
       if (durationMs) playbackDuration = durationMs / 1000;
       currentContext = {
@@ -3235,13 +3259,16 @@ function playerHtml() {
       }
     });
     $("volumeSlider").addEventListener("input", (event) => {
+      volumeUserControlled = true;
       updateVolumeUi(event.target.value);
     });
     $("volumeSlider").addEventListener("change", async (event) => {
-      const volume = Math.max(0, Math.min(100, Math.round(Number(event.target.value || 0))));
+      volumeUserControlled = true;
+      const volume = normalizeVolumeValue(event.target.value);
+      if (volume === null) return;
       updateVolumeUi(volume);
       try {
-        await api("/api/volume", { volume });
+        await applyPlayerVolume(volume);
       } catch (error) {
         $("status").textContent = error.message || "音量设置失败";
       }
