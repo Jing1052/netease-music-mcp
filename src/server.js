@@ -2479,6 +2479,7 @@ function playerHtml() {
     let playbackStartGuard = null;
     let playbackControlPendingUntil = 0;
     let playbackControlGuard = null;
+    let playbackSeekGuard = null;
     let activeLyricIndex = -1;
     let renderedLyricsKey = "";
     let playCloseTimer = null;
@@ -3207,7 +3208,14 @@ function playerHtml() {
         playbackControlGuard = null;
         playbackControlPendingUntil = 0;
       }
-      const controlPending = guardActive || (now < playbackControlPendingUntil && (!pendingId || !incomingId || pendingId === incomingId));
+      const seekGuard = playbackSeekGuard;
+      const sameSeekTrack = Boolean(seekGuard && (!seekGuard.trackId || !incomingId || seekGuard.trackId === incomingId));
+      const seekMatched = Boolean(seekGuard && sameSeekTrack && Math.abs(position - seekGuard.position) <= 1.25);
+      const seekGuardActive = Boolean(seekGuard && sameSeekTrack && now < seekGuard.expiresAt && !seekMatched);
+      if (seekMatched || (seekGuard && now >= seekGuard.expiresAt)) {
+        playbackSeekGuard = null;
+      }
+      const controlPending = guardActive || seekGuardActive || (now < playbackControlPendingUntil && (!pendingId || !incomingId || pendingId === incomingId));
       playbackDuration = duration || playbackDuration;
       if (controlPending) {
         playbackPosition = playbackPaused ? playbackPosition : computedPlaybackPosition();
@@ -3458,6 +3466,11 @@ function playerHtml() {
       const previousSyncedAt = playbackSyncedAt;
       playbackPosition = seconds;
       playbackSyncedAt = Date.now();
+      playbackSeekGuard = {
+        trackId: currentContext?.playback?.id ? String(currentContext.playback.id) : "",
+        position: seconds,
+        expiresAt: Date.now() + 6000,
+      };
       updateProgressUi(seconds, playbackDuration);
       updateLyricHighlight(seconds);
       if (playerOverlayOpen && currentContext) {
@@ -3467,6 +3480,9 @@ function playerHtml() {
         await api("/api/seek", { seconds });
         void refresh().catch(() => {});
       } catch (error) {
+        if (playbackSeekGuard?.position === seconds) {
+          playbackSeekGuard = null;
+        }
         playbackPosition = previousPosition;
         playbackSyncedAt = previousSyncedAt;
         updateProgressUi(computedPlaybackPosition(), playbackDuration);
