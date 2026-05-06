@@ -2820,7 +2820,7 @@ function playerHtml() {
         '</button>'
       )).join("") : '<div class="empty">暂无播放队列</div>';
     }
-    async function playQueueIndex(index, { fromAuto = false } = {}) {
+    async function playQueueIndex(index, { fromAuto = false, replayCurrent = false } = {}) {
       if (!playbackQueue.length) return;
       const nextIndex = Math.max(0, Math.min(playbackQueue.length - 1, Number(index || 0)));
       const track = playbackQueue[nextIndex];
@@ -2828,7 +2828,7 @@ function playerHtml() {
       queueIndex = nextIndex;
       autoAdvanceCooldownUntil = Date.now() + 5000;
       renderQueue();
-      const replayingSameTrack = fromAuto && currentContext?.playback?.id && String(currentContext.playback.id) === String(track.id);
+      const replayingSameTrack = replayCurrent || (fromAuto && currentContext?.playback?.id && String(currentContext.playback.id) === String(track.id));
       if (replayingSameTrack) {
         await replayTrack(track.id, { fromAuto, optimisticTrack: track });
       } else {
@@ -2863,7 +2863,7 @@ function playerHtml() {
         if (!playbackQueue.length || queueIndex < 0) {
           const currentId = currentContext?.playback?.id;
           if (currentId) {
-            await playTrack(currentId, { fromAuto: true, optimisticTrack: currentContext.playback });
+            await replayTrack(currentId, { fromAuto: true, optimisticTrack: currentContext.playback });
           }
           return;
         }
@@ -2878,7 +2878,7 @@ function playerHtml() {
         } else if (queueIndex >= playbackQueue.length - 1) {
           nextIndex = queueIndex;
         }
-        await playQueueIndex(nextIndex, { fromAuto: true });
+        await playQueueIndex(nextIndex, { fromAuto: true, replayCurrent: nextIndex === queueIndex });
       } finally {
         autoAdvanceInFlight = false;
       }
