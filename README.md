@@ -249,6 +249,55 @@ Web 播放器包含：
 - 黑胶歌词播放页
 - CLI 支持时显示双语歌词
 
+## 远程接入（Streamable-HTTP + 隧道）
+
+默认情况下 MCP 走 stdio，只能被本机的 Claude Desktop 调用。如果你想让**远程/云端**的 MCP 客户端（比如部署在服务器上的 AI）也能控制本机点歌，可以用内置的 Streamable-HTTP 传输，再用 Cloudflare Tunnel（或 ngrok）把它暴露出去。
+
+### 1. 用 HTTP 模式启动
+
+先设一个鉴权 token（**暴露到公网前必须设**，否则任何人都能控制你的播放器）：
+
+```powershell
+$env:NETEASE_MCP_TOKEN = "你自己的一长串随机字符串"
+$env:NETEASE_MCP_PORT  = "8766"   # 可选，默认 8766
+npm run start:http
+```
+
+启动后服务监听 `127.0.0.1:8766`，提供：
+
+- `GET  /health` —— 健康检查，返回 `{"status":"ok",...}`，无需鉴权
+- `POST /mcp` —— MCP Streamable-HTTP 端点，需要 `Authorization: Bearer <token>`（或 `?token=` 查询参数）
+
+> ⚠️ 服务只绑定 `127.0.0.1`，本身不直接对公网开放——必须靠下面的隧道转发，且隧道那头务必带上 token。
+
+### 2. 用 Cloudflare Tunnel 暴露
+
+参考 `cloudflared` 的 ingress 配置，把一个子域名指到本地 8766：
+
+```yaml
+# ~/.cloudflared/config.yml
+ingress:
+  - hostname: music.example.com
+    service: http://127.0.0.1:8766
+  - service: http_status:404
+```
+
+```powershell
+cloudflared tunnel run <你的-tunnel-名>
+```
+
+验证：浏览器或 curl 访问 `https://music.example.com/health` 应返回 `{"status":"ok",...}`。
+
+### 3. 远程客户端配置
+
+远程 MCP 客户端用 Streamable-HTTP 连接，URL 填 `https://music.example.com/mcp`，并在请求头带上：
+
+```
+Authorization: Bearer <你的 token>
+```
+
+> 说明：HTTP 模式是单会话设计，适合「一个远程客户端长期连一台本机」这种一对一陪听场景。`mpv`、`neteasecli` 仍在本机执行，声音从本机出。
+
 ## MCP 工具列表
 
 | 工具名 | 作用 |

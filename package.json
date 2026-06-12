@@ -12,6 +12,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "start:http": "node src/server.js --http",
     "check": "node --check src/server.js",
     "smoke": "node scripts/smoke.js"
   },

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
@@ -4138,6 +4140,7 @@ async function exists(filePath) {
   }
 }
 
+function createMcpServer() {
 const server = new McpServer({
   name: "netease-music-mcp",
   version: "0.1.0",
@@ -4364,9 +4367,109 @@ server.registerTool("open_web_player", {
   });
 });
 
+  return server;
+}
+
 async function selfTest() {
   const env = await ensureEnvironment();
   console.log(JSON.stringify(env, null, 2));
+}
+
+// 常数时间比对 token，避免计时侧信道
+function tokenMatches(got, expected) {
+  if (!expected) return true; // 没配 token = 不鉴权（仅本机调试用）
+  if (!got) return false;
+  const a = Buffer.from(String(got));
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function extractToken(req) {
+  const auth = req.headers["authorization"] || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (m) return m[1].trim();
+  try {
+    return new URL(req.url, "http://127.0.0.1").searchParams.get("token") || "";
+  } catch {
+    return "";
+  }
+}
+
+let httpMcpServer = null;
+const httpTransports = {}; // mcp-session-id -> transport（每个客户端会话一份）
+
+// 把这个 stdio MCP 暴露成 Streamable-HTTP，给云端（隧道那头）调用。
+// 按 session 分流：每个新客户端 initialize 时新建 server+transport，后续请求凭 mcp-session-id 复用。
+// 这样多个客户端（CC session 客户端 + api 端反复连）可以并存、互不踩。
+async function startHttpMcp(port, token) {
+  const srv = http.createServer(async (req, res) => {
+    // CORS：streamable-http 需要把 mcp-session-id 暴露给客户端
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id");
+    res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+
+    const urlPath = (req.url || "/").split("?")[0];
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (urlPath === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", service: "netease-music-mcp", transport: "streamable-http" }));
+      return;
+    }
+    if (urlPath !== "/mcp") {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    if (!tokenMatches(extractToken(req), token)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } }));
+      return;
+    }
+
+    try {
+      const sid = req.headers["mcp-session-id"];
+      let transport;
+      if (sid && httpTransports[sid]) {
+        // 已有会话 → 复用
+        transport = httpTransports[sid];
+      } else if (!sid) {
+        // 没带 session id → 当作新客户端 initialize，建一套新 server+transport
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newId) => { httpTransports[newId] = transport; },
+        });
+        transport.onclose = () => {
+          if (transport.sessionId) delete httpTransports[transport.sessionId];
+        };
+        const mcp = createMcpServer();
+        await mcp.connect(transport);
+      } else {
+        // 带了 session id 但服务端不认识（重启过/过期）→ 400，让客户端重新 initialize
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "Unknown or expired session; reinitialize." } }));
+        return;
+      }
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("[http-mcp] handleRequest error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal error" } }));
+      }
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    srv.once("error", reject);
+    srv.listen(port, "127.0.0.1", resolve);
+  });
+  httpMcpServer = srv;
+  return { port, url: `http://127.0.0.1:${port}/mcp` };
 }
 
 async function main() {
@@ -4381,6 +4484,16 @@ async function main() {
     console.log(web.url);
     return;
   }
+  if (process.argv.includes("--http")) {
+    const portIndex = process.argv.indexOf("--port");
+    const argPort = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : NaN;
+    const port = Number.isFinite(argPort) ? argPort : (Number(process.env.NETEASE_MCP_PORT) || 8766);
+    const token = (process.env.NETEASE_MCP_TOKEN || "").trim();
+    const info = await startHttpMcp(port, token);
+    console.error(`netease-music-mcp running on streamable-http at ${info.url} ${token ? "(token auth on)" : "(NO AUTH — set NETEASE_MCP_TOKEN before tunneling!)"}`);
+    return;
+  }
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("netease-music-mcp running on stdio");
