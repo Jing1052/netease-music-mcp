@@ -10,6 +10,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+// 网易云接口只对国内 IP 开放搜索——本机 Clash 等代理出口在境外，会被网易云风控（搜歌返回空）。
+// 启动时清掉本进程（及它起的 neteasecli 子进程继承的）代理变量，强制走国内直连。2026-06-15
+for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]) {
+  delete process.env[k];
+}
+process.env.NO_PROXY = "*";
+process.env.no_proxy = "*";
+
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
